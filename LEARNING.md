@@ -223,6 +223,254 @@ Writing code isn't enough - we ran it and checked:
 
 ---
 
+## Phase 2: Uploads + the "Never Store the Same File Twice" Magic
+
+**Goal of this phase:** Let people actually upload files, and make the app smart
+enough to notice when a file is a duplicate of one it already has - and if so,
+*not* waste space storing a second copy.
+
+This is the first of the app's two headline "twists" (deduplication). It's also
+the first time the app changes data instead of just reporting it.
+
+### The big idea in one picture
+
+When a file arrives, we don't save it immediately. We do this:
+
+```
+upload arrives
+      │
+      ▼
+compute its fingerprint (SHA-256 hash)
+      │
+      ▼
+is that fingerprint already in the database?
+      │
+   ┌──┴──────────────┐
+  YES                NO
+   │                  │
+return the         save file to disk,
+existing record    add a database row,
+(touch NOTHING     return the new record
+ on disk)          (deduplicated: false)
+(deduplicated:
+ true)
+```
+
+The key insight: **a duplicate file never gets written to disk at all.** We
+figure out it's a duplicate *before* saving. That's the whole space-saving trick.
+
+### What's a "hash" again, and why SHA-256?
+
+A **hash** is a fingerprint for data. You feed in a file's exact bytes and get
+back a fixed-length string of letters and numbers. Two rules make it perfect for
+finding duplicates:
+
+1. **Same content → same hash, every time.** Upload the same photo twice, you
+   get the same fingerprint twice.
+2. **Different content → different hash.** Change a single pixel and the
+   fingerprint changes completely.
+
+**SHA-256** is a specific, industry-standard hashing recipe. The "256" means the
+fingerprint is 256 bits long (shown as 64 hex characters, like
+`580787662cc5...`). It's built into Python - no extra package needed.
+
+So instead of comparing whole files byte-by-byte (slow, and we'd need every file
+in memory), we just compare their short fingerprints. If two fingerprints match,
+the files are identical.
+
+### The new files we added
+
+| File | Job |
+|------|-----|
+| `app/storage.py` | The fingerprinting + save-to-disk helpers. |
+| `app/schemas.py` | Describes the shape of the JSON we send back. |
+| `app/main.py` (edited) | The new `POST /api/upload` endpoint that ties it together. |
+
+### Step 1: The fingerprint + save helpers (`app/storage.py`)
+
+**Reading the file in chunks.** A naive approach reads the whole file into
+memory at once. That's fine for a 10 KB text file, but a 2 GB video would eat 2
+GB of RAM. Instead we read it in **chunks** - 1 MB at a time:
+
+```python
+CHUNK_SIZE = 1024 * 1024  # 1 MB (1024 * 1024 bytes)
+```
+
+The hashing function:
+
+```python
+async def compute_hash(upload_file):
+    hasher = hashlib.sha256()      # start an empty fingerprint calculator
+    total_bytes = 0
+    while True:
+        chunk = await upload_file.read(CHUNK_SIZE)  # grab up to 1 MB
+        if not chunk:              # empty chunk = end of file, stop
+            break
+        hasher.update(chunk)       # feed this chunk into the fingerprint
+        total_bytes += len(chunk)  # tally the size as we go
+    await upload_file.seek(0)      # rewind the file back to the start
+    return hasher.hexdigest(), total_bytes
+```
+
+- `hasher.update(chunk)` **adds** each chunk to the running fingerprint. After
+  the last chunk, `hasher.hexdigest()` gives the final fingerprint as text.
+- We **count the bytes** (`total_bytes`) at the same time, so we learn the
+  file's size for free without a separate step. This becomes `original_size`.
+- **`await upload_file.seek(0)` - the important subtle bit.** Reading the file to
+  hash it "uses up" the reading position, like a bookmark now sitting at the end
+  of the book. `seek(0)` moves that bookmark back to page 1, so when we save the
+  file next, we read it from the beginning again. Forget this line and you'd save
+  an empty file.
+
+> **Jargon check - `async` / `await`:** You'll see `async def` and `await` on
+> these functions. Reading a file or a network upload involves *waiting*
+> (for the disk, for the network). `async` lets the server go do useful work for
+> *other* users during that wait instead of freezing. `await` marks the exact
+> spots where waiting happens. For now: "if a function talks to files or the
+> network, it's usually `async`, and you `await` it when you call it."
+
+**Saving the file** (only reached for genuinely new files):
+
+```python
+async def save_file(upload_file, file_hash):
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)   # make the folder if missing
+    extension = Path(upload_file.filename or "").suffix   # ".png", ".txt", ...
+    destination = UPLOAD_DIR / f"{file_hash}{extension}"  # e.g. 580787...txt
+    with destination.open("wb") as out_file:        # "wb" = write, binary mode
+        while True:
+            chunk = await upload_file.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            out_file.write(chunk)
+    return destination
+```
+
+- **Why name the saved file by its hash** instead of its original name? Because
+  two different users might both upload `report.pdf` with different contents -
+  naming by original name would clash. The hash is guaranteed unique per unique
+  content. We still remember the *original* name (`a.txt`) in the database for
+  display; the file *on disk* is just named by its fingerprint.
+- `"wb"` means **write bytes**. Files aren't text, they're raw bytes (a photo, a
+  zip, a PDF), so we open in binary mode.
+- `mkdir(parents=True, exist_ok=True)` = "create the `uploaded_files/` folder,
+  and don't error if it already exists."
+
+### Step 2: The response shape (`app/schemas.py`)
+
+We already have `app/models.py` describing the *database table*. So why a second
+file describing almost the same fields?
+
+- **`models.py` = the database's internal shape.**
+- **`schemas.py` = the public shape we send out as JSON.**
+
+Keeping them separate is a deliberate, professional habit: you can rearrange your
+database later without accidentally changing what your API promises to the
+outside world. They just happen to look similar right now.
+
+These schemas are written with **Pydantic** - a library FastAPI uses to define
+and *validate* data shapes:
+
+```python
+class FileOut(BaseModel):
+    id: str
+    filename: str
+    original_size: int
+    compressed_size: int | None   # the "| None" means "or empty"
+    file_hash: str
+    upload_date: datetime
+    user_id: str | None
+    model_config = ConfigDict(from_attributes=True)
+```
+
+- `int | None` means "an integer **or** nothing." `compressed_size` is empty
+  until Phase 3 shrinks the file, so it's allowed to be `None`.
+- `from_attributes=True` is a small permission slip that lets Pydantic build this
+  response by reading the fields straight off a SQLAlchemy database object.
+
+```python
+class UploadResponse(BaseModel):
+    deduplicated: bool   # True if this file already existed
+    file: FileOut        # the file's details, nested inside
+```
+
+`deduplicated` is the flag that tells the frontend "heads up, this was already
+here - we saved you the space."
+
+### Step 3: The upload endpoint (`app/main.py`)
+
+```python
+@app.post("/api/upload", response_model=UploadResponse)
+async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
+```
+
+- **`@app.post(...)`** - unlike Phase 1's `@app.get`, this is a **POST**: the
+  request type that means "here's some data, do something with it." Uploading is
+  a POST because we're *sending* a file, not just asking for info.
+- **`response_model=UploadResponse`** tells FastAPI "the reply will look like
+  this," which also documents it automatically on the `/docs` page.
+- **`file: UploadFile = File(...)`** - FastAPI hands us the uploaded file as an
+  `UploadFile` object. The `File(...)` (with three dots meaning "required")
+  tells FastAPI to look for it in the upload form.
+- **`db: Session = Depends(get_db)`** - this is **dependency injection**:
+  FastAPI automatically opens a fresh database conversation for us and closes it
+  when we're done. We just ask for `db` and it appears.
+
+The logic inside:
+
+```python
+    file_hash, size = await storage.compute_hash(file)   # fingerprint it
+
+    existing = db.query(models.File).filter(
+        models.File.file_hash == file_hash).first()       # already have it?
+
+    if existing is not None:                              # YES - it's a dupe
+        return UploadResponse(deduplicated=True,
+                              file=FileOut.model_validate(existing))
+
+    await storage.save_file(file, file_hash)             # NO - save to disk
+    record = models.File(filename=file.filename,
+                         original_size=size, file_hash=file_hash)
+    db.add(record); db.commit(); db.refresh(record)      # write the DB row
+    return UploadResponse(deduplicated=False,
+                          file=FileOut.model_validate(record))
+```
+
+- `db.query(...).filter(...).first()` is SQLAlchemy for "SELECT the first file
+  whose `file_hash` equals this fingerprint." `.first()` returns the row, or
+  `None` if there isn't one.
+- `db.add(record)` stages the new row; `db.commit()` actually saves it;
+  `db.refresh(record)` reloads it so we get the auto-filled `id` and
+  `upload_date` back.
+
+**The safety net (the `try/except IntegrityError` bit).** There's a rare race:
+two identical *new* files uploaded at almost the same instant could both check
+"do we have this?", both see "no", and both try to save. The database's
+`unique=True` rule on `file_hash` (set back in Phase 1) blocks the second one
+with an `IntegrityError`. We catch that, undo our half-finished write
+(`db.rollback()`), and just return the copy that won the race. This is
+**defensive programming** - trusting the database as the final guardrail rather
+than assuming our check is always enough.
+
+### How we *verified* Phase 2 works
+
+Code that isn't tested is just a guess. We started the server and ran three real
+uploads with `curl`:
+
+1. Uploaded `a.txt` → response `deduplicated: false`, got a new id. ✅
+2. Uploaded the **exact same** `a.txt` again → `deduplicated: true`, **same id
+   and same hash** as before. ✅ Duplicate correctly recognized.
+3. Uploaded a **different** file `b.txt` → `deduplicated: false`, a brand-new id
+   and different hash. ✅
+
+Then we checked the two places data lives:
+- **On disk:** `uploaded_files/` held exactly **2** files (not 3), each named by
+  its hash. ✅ The duplicate was never written.
+- **In the database:** exactly **2** rows. ✅
+
+That's the whole promise of this phase proven: identical content is stored once.
+
+---
+
 ## Command Cheat Sheet (bookmark this)
 
 All commands are run from inside the `backend/` folder unless noted. On Windows
@@ -239,6 +487,18 @@ PowerShell:
   - `http://127.0.0.1:8000/docs` - the interactive API test page
 
 **Stop the server:** press `Ctrl + C` in that terminal.
+
+**Test a file upload** (from any folder, with the server running). The easiest
+way is the interactive `/docs` page: open `http://127.0.0.1:8000/docs`, expand
+`POST /api/upload`, click *Try it out*, choose a file, and *Execute*. Upload the
+same file twice and watch `deduplicated` flip from `false` to `true`.
+
+Or from the command line with `curl` (replace `myfile.png` with a real file):
+```
+curl -F "file=@myfile.png" http://127.0.0.1:8000/api/upload
+```
+`-F "file=@..."` means "send this as an uploaded form file." The `@` tells curl
+"read an actual file from disk," not send the literal text.
 
 **Reinstall dependencies** (e.g. on a new computer after cloning):
 ```
@@ -278,6 +538,29 @@ python -m venv .venv
 - **Model** - a Python class that describes one database table (our `File`).
 - **Hash / fingerprint** - a short code derived from a file's contents; unique
   per unique file. Powers duplicate detection.
+- **SHA-256** - a specific, standard hashing recipe producing a 256-bit (64
+  hex-character) fingerprint. Built into Python. What we use to fingerprint files.
+- **Deduplication ("dedup")** - detecting that a file is identical to one already
+  stored, and reusing the existing copy instead of saving a duplicate.
+- **Chunk / streaming** - reading a file in small pieces (we use 1 MB) instead of
+  all at once, so memory stays small even for huge files.
+- **seek(0)** - rewinding a file's read position back to the start, so it can be
+  read again from the beginning.
+- **UploadFile** - FastAPI's object representing a file someone uploaded.
+- **Pydantic** - the library FastAPI uses to describe and validate data shapes
+  (our `schemas.py`). Guards what goes in and out of the API.
+- **Schema** - a description of a data shape (which fields, which types). Ours
+  describe the JSON the API returns.
+- **POST** - the request type meaning "here's data, do something with it" (used
+  for uploads), as opposed to GET ("just give me info").
+- **Dependency injection (`Depends`)** - FastAPI automatically creating and
+  handing us something we need (like a database session) when a request comes in.
+- **Binary mode (`"wb"`)** - opening a file to write raw bytes (photos, PDFs),
+  not text.
+- **async / await** - a way of writing functions that can pause while waiting
+  (for disk or network) and let the server serve other users meanwhile.
+- **IntegrityError** - the error a database raises when a write would break a
+  rule (like our "no two files with the same hash"). We catch it as a safety net.
 - **Virtual environment (`.venv`)** - an isolated per-project Python + its
   packages.
 - **pip** - Python's package installer (its "app store").
@@ -297,8 +580,8 @@ python -m venv .venv
 
 ## Progress Tracker
 
-- [x] **Phase 1** - Database + running server with a health check ← *you are here*
-- [ ] **Phase 2** - Hashing + duplicate detection on upload
+- [x] **Phase 1** - Database + running server with a health check
+- [x] **Phase 2** - Hashing + duplicate detection on upload ← *you are here*
 - [ ] **Phase 3** - Auto-shrink images to WebP
 - [ ] **Phase 4** - React dashboard (upload zone + file table)
 - [ ] **Phase 5** - Analytics charts (space saved, file types)

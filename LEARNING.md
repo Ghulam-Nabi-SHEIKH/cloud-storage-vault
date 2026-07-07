@@ -512,6 +512,102 @@ python -m venv .venv
 
 ---
 
+## The Git Workflow (how every change reaches `main` now)
+
+Starting after Phase 2, `main` (our master copy of the code) is **protected**.
+GitHub now refuses any attempt to `git push` straight to it. Every change -
+even a one-line typo fix - has to travel the same safe path. This is how
+professional teams work, and doing it solo builds the habit.
+
+### Why we bother (the one-minute version)
+
+`main` is supposed to *always work*. If you edit it directly and make a mistake,
+your master copy is now broken. Instead, we do our work on a **branch** (a
+private copy), then open a **Pull Request** (a formal "please add my changes"
+proposal) so there's a review checkpoint before anything touches `main`.
+
+> **Branch** = a parallel copy of the code where you can work freely without
+> affecting `main`. **Pull Request (PR)** = the request to merge your branch's
+> changes into `main`, showing exactly what changed.
+
+### The 6 steps, every time
+
+Run these from the project root. Replace the branch name and messages to match
+your actual work.
+
+**1. Create a branch off `main`** (start from an up-to-date `main` first):
+```
+git checkout main
+git pull
+git checkout -b my-change-name
+```
+- `git checkout main` + `git pull` = "make sure my starting point is the latest."
+- `git checkout -b my-change-name` = "create a new branch called
+  `my-change-name` and switch to it." The `-b` means "and build it (create it)."
+- Name branches after the work: `phase-3-webp`, `fix-upload-typo`.
+
+**2. Do your work, then commit it** (as many commits as you like):
+```
+git add .
+git commit -m "feat: describe what you did"
+```
+- `git add .` = "stage every change I made" (the `.` means "this whole folder").
+- `git commit` = "save a snapshot with this message."
+
+**3. Push the *branch* to GitHub** (NOT `main`):
+```
+git push -u origin my-change-name
+```
+- This uploads your branch. `-u origin my-change-name` links your local branch to
+  the one on GitHub so future `git push` (no arguments) knows where to go.
+
+**4. Open a Pull Request:**
+```
+gh pr create --fill
+```
+- `gh pr create` opens a new PR. `--fill` auto-writes the title/description from
+  your commit messages so you don't have to retype them.
+- This prints a link to the PR on GitHub where you can see the diff.
+
+**5. Merge the PR** (you can merge your own, since we require 0 approvals):
+```
+gh pr merge --squash --delete-branch
+```
+- `--squash` = "combine all the commits on this branch into one tidy commit on
+  `main`." Keeps `main`'s history clean and readable.
+- `--delete-branch` = "clean up the branch afterwards; we don't need it anymore."
+
+**6. Return to `main` and pull the merged result:**
+```
+git checkout main
+git pull
+```
+Now your local `main` matches GitHub again, and you're ready for the next change.
+
+### Cheat sheet version (copy-paste, edit the names)
+
+```
+git checkout main && git pull
+git checkout -b my-change-name
+# ...edit files...
+git add . && git commit -m "feat: what I did"
+git push -u origin my-change-name
+gh pr create --fill
+gh pr merge --squash --delete-branch
+git checkout main && git pull
+```
+
+### "Help, I forgot and edited `main` directly!"
+
+No harm done - you just can't *push* it. Move your work onto a branch:
+```
+git checkout -b my-change-name   # takes your uncommitted edits with you
+```
+Then continue from step 2. Nothing is lost; you were only ever blocked at the
+push, which hasn't happened yet.
+
+---
+
 ## Glossary (every jargon word, one line each)
 
 - **Backend** - the behind-the-scenes engine (server + database + logic). Users
@@ -575,6 +671,17 @@ python -m venv .venv
   after it already holds data.
 - **Git / commit / GitHub** - Git tracks the history of your code; a commit is
   one saved snapshot; GitHub is the website that stores it online.
+- **Branch** - a parallel copy of the code where you work without touching
+  `main`. `main` is itself a branch - the master one.
+- **Pull Request (PR)** - a proposal to merge a branch into `main`, showing the
+  exact changes for review before they land.
+- **Merge** - combining a branch's changes into another branch (usually `main`).
+- **Squash** - collapsing all of a branch's commits into a single tidy commit
+  when merging.
+- **Branch protection** - GitHub rules that stop anyone pushing directly to a
+  branch, forcing changes through PRs.
+- **CI (Continuous Integration)** - automated checks (tests, linting) that run on
+  every push/PR to catch problems before they reach `main`.
 
 ---
 

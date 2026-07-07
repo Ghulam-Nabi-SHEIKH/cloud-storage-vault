@@ -1,0 +1,23 @@
+# Dependabot: GitHub's built-in dependency watchdog.
+# It watches the files listed below and opens a Pull Request whenever a package
+# has a new version - and urgently if a version has a known security hole.
+# https://docs.github.com/code-security/dependabot
+version: 2
+updates:
+  # Our Python backend packages (reads requirements.txt + requirements-dev.txt).
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+
+  # The versions of the actions used inside our CI workflow (e.g. checkout@v4),
+  # so those stay current and secure too.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"

@@ -29,11 +29,7 @@ async def upload_file(
     """
     file_hash, size = await storage.compute_hash(file)
 
-    existing = (
-        db.query(models.File)
-        .filter(models.File.file_hash == file_hash)
-        .first()
-    )
+    existing = db.query(models.File).filter(models.File.file_hash == file_hash).first()
     if existing is not None:
         return UploadResponse(deduplicated=True, file=FileOut.model_validate(existing))
 
@@ -55,9 +51,7 @@ async def upload_file(
         # database is the final guard: roll back and return the record that won.
         db.rollback()
         existing = (
-            db.query(models.File)
-            .filter(models.File.file_hash == file_hash)
-            .first()
+            db.query(models.File).filter(models.File.file_hash == file_hash).first()
         )
         return UploadResponse(deduplicated=True, file=FileOut.model_validate(existing))
 

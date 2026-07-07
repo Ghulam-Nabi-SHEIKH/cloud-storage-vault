@@ -1,0 +1,6 @@
+# Development-only tools. Not needed to RUN the app, only to check it.
+# Installed in CI and locally when you want to lint/test.
+# (Kept separate from requirements.txt so the production install stays lean.)
+ruff==0.15.20      # linter + formatter ("lint remover")
+pytest==9.1.1      # test runner
+httpx==0.28.1      # HTTP client that FastAPI's TestClient uses under the hood

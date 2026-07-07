@@ -1,0 +1,17 @@
+# Tool configuration for the backend. This file is NOT the app itself - it just
+# holds settings for our developer tools (Ruff and pytest) in one place, so they
+# behave identically on your machine and in CI.
+
+[tool.ruff]
+# Match the Python version we actually run.
+target-version = "py313"
+# 88 characters is Ruff's (and Black's) default line width. Stated explicitly so
+# there's no ambiguity about the rule the formatter enforces.
+line-length = 88
+
+[tool.pytest.ini_options]
+# Where our tests live.
+testpaths = ["tests"]
+# Add the backend/ folder to Python's import path so tests can do
+# `from app.main import app` (app/ lives directly under backend/).
+pythonpath = ["."]
